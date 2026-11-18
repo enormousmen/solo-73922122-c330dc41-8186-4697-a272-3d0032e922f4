@@ -25,14 +25,29 @@
 | 需求 | 实现位置 |
 | --- | --- |
 | 两端并行调用，客户端只收主端原状态码、原字节 | `app/gateway.py` `proxy()` / `body_iter()` 逐块透传 |
-| 影子慢/失败/超时不拖住主响应 | 影子为独立后台任务；主端流结束即返回客户端，`wait_for(2s)` 只取消影子 |
+| 影子慢/失败/超时不拖住主响应 | 影子为独立后台任务；主端流结束即返回客户端，`asyncio.timeout(2s)` 只取消影子 |
 | 两端流式 SHA-256，完整结束才比较 | 每块 `hash.update()` 后立即释放；`_compare()` 仅在两端 `completed` 时调用 |
 | 未收完整不能报一致 | 中间态 `shadow_pending` / 断连 / 超时 / 主端不完整均不会产生 `match` |
 | 最多 4 个影子调用，满则跳过并注明原因 | `ShadowLimiter`（acquire/release 覆盖整个影子通信生命周期） |
-| 影子发起起 2 秒超时，只终止影子 | `asyncio.wait_for(coro, timeout=2.0)` 包住完整影子请求 |
+| 影子发起起 2 秒超时，只终止影子 | `asyncio.timeout(2.0)`；不用 `wait_for`，避免取消被吞后影子继续读流 |
 | 客户端断连终止两端 | `request.is_disconnected()` 检测后取消影子任务并释放主端连接 |
-| 通信实际退出后才归还名额 | 名额在 `run_shadow` 的 `finally` 中释放 |
+| 通信实际退出后才归还名额 | 名额在 `run_shadow` 的 `finally` 与任务完成回调中幂等释放 |
+| 主端在影子首次运行前就报错也不漏名额 | 未启动的影子由 `stop_shadow` / 完成回调归还；502 并保留 `primary_error` |
+| 取消与正常结束交错不重复归还、不改写故障 | `slot_held` 幂等释放；`set_result()` 禁止把 `primary_error` 改成 `client_disconnected` |
 | 不整份缓存/落盘，内存限 96MiB | 仅保存 64KiB 块与哈希状态；compose `mem_limit: 96m`，实测峰值 < 60MiB |
+
+### 主端故障时的收尾
+
+主端请求失败（连接失败、传输中断）时：
+
+1. 客户端收到 **502**（`primary quote service unavailable`），记录结果为 `primary_error`
+   或 `primary_incomplete`，`primary` 字段保留异常类型，**不会被改写成客户端断连**；
+2. 若影子任务已占名额但**尚未获得首次执行机会**：协程体不会执行、`finally` 不生效，
+   由任务完成回调 / `stop_shadow` 立即归还名额，影子状态记为
+   `cancelled before start (primary_error)`；
+3. 若影子**已经启动**：发出取消后等待通信真正退出才归还名额（状态 `cancelled: <原因>`），
+   取消与正常结束交错时也只归还一次；
+4. 主端恢复后无需重启网关：名额空闲，后续报价继续逐块透传并重新得到完整双端比对。
 
 ## 启动
 
@@ -45,6 +60,8 @@ docker compose up --build
 ```
 
 ### 本地直接运行（无 Docker）
+
+需要 Python 3.11+（`asyncio.timeout` 与 `asyncio.Task.cancelling` 的语义依赖 3.11；镜像固定 `python:3.11-slim`）。
 
 ```bash
 python -m venv .venv
@@ -82,7 +99,14 @@ bash scripts/run_local.sh
 ```bash
 # 先按 scripts/run_local.sh 启动三服务, 然后:
 .venv/bin/python -I tests/selftest.py http://127.0.0.1:8000
+
+# 主端故障收尾专项 (自带主端/影子/网关, 不需要先启动服务):
+.venv/bin/python tests/failure_selftest.py
 ```
 
-覆盖：一致/不一致比对、主端字节与状态码原样透传、影子 2s 超时隔离、4 名额满跳过且注明原因、
-名额归还、32MiB 流式完整性与摘要、96MiB 内存约束、客户端断连双端终止。
+`tests/selftest.py` 覆盖：一致/不一致比对、主端字节与状态码原样透传、影子 2s 超时隔离、
+4 名额满跳过且注明原因、名额归还、32MiB 流式完整性与摘要、96MiB 内存约束、客户端断连双端终止。
+
+`tests/failure_selftest.py` 覆盖主端故障收尾：主端在影子首次运行前失败（连续 8 次不再卡 4/4）、
+主端在影子在途时失败、主端传输中断、取消与正常结束交错（名额不越界/不重复归还/不误写断连）、
+硬断连风暴（含取消吞没竞态）、主端恢复后逐块透传与完整双端比对。

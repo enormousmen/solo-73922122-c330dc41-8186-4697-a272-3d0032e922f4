@@ -54,7 +54,7 @@
   .pill.shadow_timeout,.pill.shadow_error { background:#fef3c7; color:var(--warn); }
   .pill.shadow_skipped_no_slot { background:#e0e7ff; color:#3730a3; }
   .pill.client_disconnected,.pill.primary_error,.pill.primary_incomplete,
-  .pill.shadow_pending {
+  .pill.shadow_pending,.pill.shadow_cancelled {
           background:#f1f5f9; color:#475569; }
   .mono { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
   .records-wrap { max-height:520px; overflow:auto; }
@@ -236,7 +236,7 @@ const RESULT_TEXT = {
   shadow_error: '影子失败', shadow_skipped_no_slot: '影子跳过(名额满)',
   client_disconnected: '客户端断连', primary_error: '主端失败',
   primary_incomplete: '主端不完整', shadow_completed_primary_incomplete: '主端未完成',
-  shadow_pending: '影子进行中',
+  shadow_pending: '影子进行中', shadow_cancelled: '影子随主端取消',
 };
 
 function shortHash(h) { return h ? h.slice(0, 10) + '…' : '—'; }
